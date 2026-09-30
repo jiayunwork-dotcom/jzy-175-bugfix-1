@@ -1,0 +1,15 @@
+services:
+  siting:
+    build: .
+    image: siting:latest
+    ports:
+      - "8000:8000"
+    volumes:
+      - siting-data:/data
+    environment:
+      SITING_DATA_DIR: /data
+      SITING_WORKERS: "4"
+    restart: unless-stopped
+
+volumes:
+  siting-data:
