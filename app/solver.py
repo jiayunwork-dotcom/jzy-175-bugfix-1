@@ -8,7 +8,10 @@ time limit.  The crucial contract enforced here:
   optimal.
 * ``lower_bound`` is always a mathematically valid lower bound on the optimum
   (forced sites included), both at the root and whenever the search is
-  stopped early.  Therefore ``lower_bound <= optimum <= best_size``.
+  stopped early.  Therefore ``lower_bound <= optimum <= best_size``.  When
+  the tree is exhausted (``proven_optimal=True``) the incumbent *is* the
+  optimum, which is itself the tightest valid bound, so the reported bound is
+  lifted to ``best_size`` and the gap is consequently 0.
 
 Lower bound
 ------------
@@ -427,7 +430,13 @@ def exact_set_cover(
         stop_reason = "completed"
 
     proven = stop_reason == "completed" and best is not None
-    if best is not None and global_lb > len(best):
+    if proven:
+        # The search was exhausted (or closed by a bound), so ``best`` is the
+        # proven optimum; the optimum itself is the tightest possible valid
+        # lower bound. Reporting the stale root packing here would leave
+        # proven_optimal=true together with a positive gap.
+        global_lb = len(best)
+    elif best is not None and global_lb > len(best):
         # root bound must never exceed a feasible incumbent's size; if it did
         # the bound would be invalid, so clamp defensively.
         global_lb = len(best)

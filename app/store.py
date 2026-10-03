@@ -68,6 +68,40 @@ class Conflict(RuntimeError):
     pass
 
 
+def normalize_result(result: Any) -> Any:
+    """Make a persisted result obey the search-state invariants on read.
+
+    Older builds wrote ``proven_optimal=true`` together with a *stale root
+    packing lower bound* (the reported bound was never raised after the search
+    tree was exhausted). A completed proof means the incumbent *is* the
+    optimum, which is itself the tightest valid lower bound, so such rows are
+    coherent after lifting ``lower_bound`` to ``best_size`` (and ``gap`` to 0).
+
+    This deliberately touches only the two derived search-state fields and is
+    applied **on read**: stored bytes are never rewritten, so historical
+    versions keep the exact plan they were solved with (``site_ids``,
+    ``best_size`` and ``uncovered_resident_ids`` are never modified). Results
+    stopped early (timeout/cancelled/interrupted) are left untouched -- their
+    bound is a valid relaxation bound and may sit strictly below the optimum.
+    Sweep results are normalised point by point.
+    """
+    if not isinstance(result, dict):
+        return result
+    if isinstance(result.get("points"), list):
+        result["points"] = [
+            normalize_result(p) if isinstance(p, dict) else p for p in result["points"]
+        ]
+        return result
+    if result.get("proven_optimal") is True and result.get("feasible") is True:
+        best = result.get("best_size")
+        if isinstance(best, int) and not isinstance(best, bool):
+            lb = result.get("lower_bound")
+            if not isinstance(lb, int) or isinstance(lb, bool) or lb < best:
+                result["lower_bound"] = best
+                result["gap"] = 0
+    return result
+
+
 def connect(db_path: str) -> sqlite3.Connection:
     os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
     conn = sqlite3.connect(db_path, timeout=30, check_same_thread=False)
@@ -245,7 +279,11 @@ class Store:
         d = dict(row)
         d["params"] = json.loads(d.pop("params_json"))
         d["progress"] = json.loads(d.pop("progress_json"))
-        d["result"] = json.loads(d.pop("result_json")) if d.get("result_json") else None
+        d["result"] = (
+            normalize_result(json.loads(d.pop("result_json")))
+            if d.get("result_json")
+            else None
+        )
         return d
 
     def get_job(self, job_id: str) -> dict[str, Any]:
