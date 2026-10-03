@@ -64,6 +64,10 @@ def test_engine_timeout_sandwich():
     )
     assert full.proven_optimal is True
     optimum = full.best_size
+    # a completed, proven search must report a tight bound: the exhausted
+    # tree certifies nothing smaller than the incumbent exists
+    assert full.lower_bound == optimum
+    assert full.gap == 0
 
     timed = exact_set_cover(
         [p["id"] for p in residents],

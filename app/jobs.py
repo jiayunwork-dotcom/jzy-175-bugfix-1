@@ -8,6 +8,10 @@ nodes.
 
 On startup, any job left ``queued``/``running`` by a previous process is
 marked ``interrupted`` (its stored result stays available when present).
+Also on startup, results persisted by older solver versions are repaired
+once (see :meth:`Store.repair_legacy_optimal_bounds`) so every read path --
+dedup reuse, per-version history, incremental parent-seed lookup -- serves
+self-consistent records.
 """
 
 from __future__ import annotations
@@ -38,6 +42,9 @@ class JobManager:
         self._threads: list[threading.Thread] = []
         n_interrupted = store.mark_interrupted_on_startup()
         self.interrupted_on_startup = n_interrupted
+        # Repair pre-fix completed results (proven_optimal with a loose lower
+        # bound) once, before any read path can serve them.  Idempotent.
+        self.legacy_results_repaired = store.repair_legacy_optimal_bounds()
         for i in range(self.workers):
             t = threading.Thread(target=self._worker_loop, name=f"siting-worker-{i}", daemon=True)
             t.start()

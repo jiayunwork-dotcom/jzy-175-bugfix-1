@@ -68,6 +68,51 @@ class Conflict(RuntimeError):
     pass
 
 
+def _repaired_single_result(res: dict[str, Any]) -> tuple[dict[str, Any] | None, int | None]:
+    """Correct one stored solve-result dict if it is a legacy contradiction.
+
+    Returns ``(fixed, tight_lb)`` -- a corrected copy and the bound it was
+    raised to -- or ``(None, None)`` when the record is already coherent or
+    not a proven-optimal feasible result.
+    """
+    if not res.get("proven_optimal") or not res.get("feasible"):
+        return None, None
+    best = res.get("best_size")
+    lb = res.get("lower_bound")
+    if not isinstance(best, int) or not isinstance(lb, int) or lb == best:
+        return None, None
+    fixed = dict(res)
+    fixed["lower_bound"] = best
+    fixed["gap"] = 0
+    return fixed, best
+
+
+def _repaired_result_bounds(
+    result: dict[str, Any],
+) -> tuple[dict[str, Any] | None, int | None]:
+    """Repair a stored job result (plain solve or sweep ``points`` list).
+
+    Returns ``(fixed_result, tight_lb)``; ``tight_lb`` is only set for
+    single-solve results so callers can align the final progress snapshot.
+    """
+    points = result.get("points")
+    if isinstance(points, list):  # sweep: repair each step independently
+        changed = False
+        new_points = []
+        for p in points:
+            fixed, _ = (
+                _repaired_single_result(p) if isinstance(p, dict) else (None, None)
+            )
+            changed |= fixed is not None
+            new_points.append(fixed if fixed is not None else p)
+        if not changed:
+            return None, None
+        out = dict(result)
+        out["points"] = new_points
+        return out, None
+    return _repaired_single_result(result)
+
+
 def connect(db_path: str) -> sqlite3.Connection:
     os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
     conn = sqlite3.connect(db_path, timeout=30, check_same_thread=False)
@@ -296,6 +341,52 @@ class Store:
                 (time.time(),),
             )
             return cur.rowcount
+
+    def repair_legacy_optimal_bounds(self) -> int:
+        """One-time, idempotent repair of results stored by the pre-fix solver.
+
+        The old solver could persist ``proven_optimal=true`` with
+        ``lower_bound < best_size`` (it reported the root packing bound
+        instead of what the exhausted search tree had actually proved).  For
+        a *proven* result the completed search certifies that no cover
+        smaller than ``best_size`` exists, so the stored bound is raised to
+        ``best_size`` and the gap to 0.  Only these derived search-status
+        fields are touched -- the chosen sites and the station count (the
+        plan itself) are preserved exactly, as are timeout/cancelled records
+        whose looser bounds remain valid.  Returns the number of jobs fixed.
+        """
+        repaired = 0
+        with self._lock, connect(self.db_path) as conn:
+            rows = conn.execute(
+                "SELECT id, result_json, progress_json FROM jobs "
+                "WHERE result_json IS NOT NULL"
+            ).fetchall()
+            for row in rows:
+                result = json.loads(row["result_json"])
+                new_result, tight_lb = _repaired_result_bounds(result)
+                if new_result is None:
+                    continue
+                progress_json = row["progress_json"]
+                if tight_lb is not None:
+                    # keep the job's final progress snapshot coherent with
+                    # the repaired result (the fixed solver emits its last
+                    # progress after the bound is finalised)
+                    progress = json.loads(progress_json or "{}")
+                    if progress.get("lower_bound") != tight_lb:
+                        progress["lower_bound"] = tight_lb
+                        progress_json = json.dumps(progress, ensure_ascii=False)
+                conn.execute(
+                    "UPDATE jobs SET result_json=?, progress_json=?, "
+                    "updated_at=? WHERE id=?",
+                    (
+                        json.dumps(new_result, ensure_ascii=False),
+                        progress_json,
+                        time.time(),
+                        row["id"],
+                    ),
+                )
+                repaired += 1
+        return repaired
 
     # --------------------------------------------------------- coverage cache
     def get_coverage(self, version_id: str, radius_repr: str) -> dict[str, list[str]] | None:
